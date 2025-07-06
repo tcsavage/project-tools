@@ -1,85 +1,39 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, TFile } from 'obsidian';
+import { Temporal } from 'temporal-polyfill';
 
 // Remember to rename these classes and interfaces!
 
-interface MyPluginSettings {
+interface ProjectToolsSettings {
 	mySetting: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
+const DEFAULT_SETTINGS: ProjectToolsSettings = {
 	mySetting: 'default'
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class ProjectToolsPlugin extends Plugin {
+	settings: ProjectToolsSettings;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
+		// FIXME: Responding to changes immediately has some issues.
+		// // Listen for property value changes in the properties editor
+		// this.registerDomEvent(document, 'input', (evt: Event) => {
+		// 	this.handlePropertyChange(evt);
+		// });
+		
+		// Also listen for blur events to catch when editing is complete
+		this.registerDomEvent(document, 'blur', (evt: Event) => {
+			this.handlePropertyChange(evt);
+		}, true); // Use capture to catch all blur events
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		this.addSettingTab(new ProjectToolsSettingTab(this.app, this));
 	}
 
 	onunload() {
-
+		// NOTE: registerDomEvent will automatically remove the event listener when this plugin is disabled.
 	}
 
 	async loadSettings() {
@@ -89,28 +43,154 @@ export default class MyPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	async handlePropertyChange(evt: Event) {
+		const target = evt.target as HTMLElement;
+		
+		// Check if this is a contenteditable property value
+		if (!target.classList.contains('metadata-input-longtext')) return;
+		
+		// Find the parent property container
+		const propertyContainer = target.closest('.metadata-property');
+		if (!propertyContainer) return;
+		
+		// Check if this is the project/status property
+		const propertyKey = propertyContainer.getAttribute('data-property-key');
+		if (propertyKey !== 'project/status') return;
+		
+		// Get the new value
+		const newValue = target.textContent?.trim();
+		if (newValue !== 'complete') return;
+
+		// Remove focus from the input
+		target.blur();
+		
+		// Handle the status change to "complete"
+		await this.handleProjectStatusComplete();
+	}
+
+	async handleProjectStatusComplete() {
+		// NOTE: Assumes the active file is the one being edited in the properties panel.
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) return;
+		
+		// Check if this is a repeating project
+		const fileCache = this.app.metadataCache.getFileCache(activeFile);
+		if (!fileCache?.frontmatter?.['project/repeating']) return;
+		
+		// Show confirmation dialog
+		const confirmed = await this.showRepeatConfirmationDialog();
+		if (confirmed) {
+			// Perform the repeat logic
+			await this.repeatProject({ sourcePath: activeFile.path });
+			
+			// Trigger a refresh of the properties panel to reflect the status change back to "active"
+			this.app.workspace.trigger('editor-change');
+		}
+		// If user cancels, we leave the status as "complete" since they explicitly set it
+	}
+
+
+
+
+	async showRepeatConfirmationDialog(): Promise<boolean> {
+		return new Promise((resolve) => {
+			const modal = new Modal(this.app);
+			modal.titleEl.setText('Repeat Project');
+			modal.contentEl.createEl('p', { 
+				text: 'This is a repeating project. Do you want to mark it as complete and schedule the next occurrence?' 
+			});
+			
+			const buttonContainer = modal.contentEl.createDiv({ cls: 'modal-button-container' });
+			buttonContainer.style.display = 'flex';
+			buttonContainer.style.gap = '10px';
+			buttonContainer.style.justifyContent = 'flex-end';
+			buttonContainer.style.marginTop = '20px';
+			
+			const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
+			cancelButton.addEventListener('click', () => {
+				modal.close();
+				resolve(false);
+			});
+			
+			const confirmButton = buttonContainer.createEl('button', { 
+				text: 'Repeat Project',
+				cls: 'mod-cta'
+			});
+			confirmButton.addEventListener('click', () => {
+				modal.close();
+				resolve(true);
+			});
+			
+			modal.open();
+		});
+	}
+
+	async repeatProject(ctx: { sourcePath: string }): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+		if (!file || !(file instanceof TFile)) {
+			new Notice('Unable to find file to update');
+			return;
+		}
+
+		const fileCache = this.app.metadataCache.getFileCache(file);
+		const frontmatter = fileCache?.frontmatter;
+		
+		if (!frontmatter) {
+			new Notice('No frontmatter found');
+			return;
+		}
+
+		const repeatInterval = frontmatter['project/repeat-interval'];
+		const dueDate = frontmatter['project/due-date'];
+		const startDate = frontmatter['project/start-date'];
+		
+		if (!repeatInterval) {
+			new Notice('No repeat interval specified');
+			return;
+		}
+
+		try {
+			// Parse the ISO 8601 duration
+			const duration = Temporal.Duration.from(repeatInterval);
+			
+			// Calculate new dates
+			let newDueDate = dueDate;
+			let newStartDate = startDate;
+			
+			if (dueDate) {
+				const dueDateObj = Temporal.PlainDate.from(dueDate);
+				newDueDate = dueDateObj.add(duration).toString();
+			}
+			
+			if (startDate) {
+				const startDateObj = Temporal.PlainDate.from(startDate);
+				newStartDate = startDateObj.add(duration).toString();
+			}
+			
+			// Update the frontmatter using processFrontMatter
+			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+				if (newDueDate) {
+					frontmatter['project/due-date'] = newDueDate;
+				}
+				if (newStartDate) {
+					frontmatter['project/start-date'] = newStartDate;
+				}
+				frontmatter['project/status'] = 'active';
+			});
+			
+			new Notice('Project repeated successfully');
+			
+		} catch (error) {
+			new Notice(`Error repeating project: ${error.message}`);
+		}
+	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class ProjectToolsSettingTab extends PluginSettingTab {
+	plugin: ProjectToolsPlugin;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: ProjectToolsPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
